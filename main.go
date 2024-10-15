@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -56,6 +57,12 @@ type Response struct {
 	Status      string    `json:"status"`
 }
 
+type GetNumberResponse struct {
+	ActivationID int    `json:"activationID"`
+	Number       string `json:"number"`
+	Status       string `json:"status"`
+}
+
 func init() {
 	var err error
 	db, err = sql.Open("sqlite3", "mydatabase.db")
@@ -65,19 +72,18 @@ func init() {
 }
 
 func createReportsTable(db *sql.DB) error {
-	// Удаляем таблицу, если она существует
+	// Удаляем таблицы, если она существует
 	_, err := db.Exec("DROP TABLE IF EXISTS reports")
 	if err != nil {
 		return err
 	}
 
-	// Удаляем таблицу, если она существует
 	_, err1 := db.Exec("DROP TABLE IF EXISTS get_numbers")
 	if err1 != nil {
 		return err1
 	}
 
-	// Создаем таблицу
+	// Создаем таблицы
 	if _, err = db.Exec(`
         CREATE TABLE reports (
             id TEXT PRIMARY KEY,
@@ -91,7 +97,6 @@ func createReportsTable(db *sql.DB) error {
 		return err
 	}
 
-	// Создаем таблицу get_numbers
 	if _, err = db.Exec(`
         CREATE TABLE get_numbers (
             id TEXT PRIMARY KEY,
@@ -145,7 +150,7 @@ func handleForm(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Invalid request method", http.StatusBadRequest)
 }
 
-func testProtocol_GET_NUMBER(url string, token string, country string, service string) string {
+func testProtocol_GET_NUMBER(url string, token string, country string, service string) (string, GetNumberResponse, error) {
 	// Реализация логики GET_NUMBER
 	requestBodyGetNumber := RequestBodyGetNumber{
 		Action:   "GET_NUMBER",
@@ -159,15 +164,13 @@ func testProtocol_GET_NUMBER(url string, token string, country string, service s
 	// Конвертируем структуру в JSON
 	jsonBodyGetNumber, err := json.Marshal(requestBodyGetNumber)
 	if err != nil {
-		fmt.Println(err)
-		return ""
+		return "", GetNumberResponse{}, err
 	}
 
 	// Создаем HTTP-запрос для GET_NUMBER
 	reqGetNumber, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBodyGetNumber))
 	if err != nil {
-		fmt.Println(err)
-		return ""
+		return "", GetNumberResponse{}, err
 	}
 
 	// Устанавливаем заголовки
@@ -177,32 +180,30 @@ func testProtocol_GET_NUMBER(url string, token string, country string, service s
 	// Отправляем запрос для GET_NUMBER
 	respGetNumber, err := http.DefaultClient.Do(reqGetNumber)
 	if err != nil {
-		fmt.Println(err)
-		return ""
+		return "", GetNumberResponse{}, err
 	}
 	defer respGetNumber.Body.Close()
 
 	// Проверяем статус ответа для GET_NUMBER
 	if respGetNumber.StatusCode != http.StatusOK {
-		fmt.Println("Failed to get number")
-		return ""
+		return "", GetNumberResponse{}, errors.New("Failed to get number")
 	}
 
-	// Печатаем ответ
-	fmt.Println("Status:", respGetNumber.Status)
-	fmt.Println("Headers:")
-	for name, values := range respGetNumber.Header {
-		fmt.Println(name, ":", values)
-	}
-	fmt.Println("Body:")
+	// Читаем тело ответа
 	body, err := ioutil.ReadAll(respGetNumber.Body)
 	if err != nil {
-		fmt.Println(err)
-		return ""
+		return "", GetNumberResponse{}, err
 	}
-	fmt.Println(string(body))
 
-	return string(body)
+	// Десериализуем ответ в структуру
+	var response GetNumberResponse
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return "", GetNumberResponse{}, err
+	}
+
+	// Возвращаем ответ в виде строки и в виде структуры
+	return string(body), response, nil
 }
 
 func testProtocol_GET_SERVICES(url string, token string) (string, Response, error) {
@@ -279,48 +280,41 @@ func createReport(url string, token string) string {
 		return ""
 	}
 
-	fmt.Println("Ответ в виде структуры:")
 	country := response.CountryList[0].Country
-	fmt.Println(country)
-	fmt.Println("OperatorMap:")
-	fmt.Println(response.CountryList[0].OperatorMap)
+	var countNumber int
+	var oneKey string
+	for _, value := range response.CountryList[0].OperatorMap {
+		for k, v := range value {
+			countNumber = v
+			oneKey = k
+			break
+		}
+		break
+	}
 
-	firstKey := ""
-	firstValue := make(map[string]int)
-	for key, value := range response.CountryList[0].OperatorMap {
-		firstKey = key
-		firstValue = value
-		fmt.Printf("Ключ первого уровня: %s\n", firstKey)
-		break
+	numbers, err := getNumbers(url, token, country, countNumber, oneKey)
+	if err != nil {
+		log.Fatal(err)
 	}
-	var resultGetNumber string
-	var count string
-	var redactString string
-	for k, v := range firstValue {
-		fmt.Printf("  Ключ второго уровня: %s, Значение: %d\n", k, v)
-		count = strconv.Itoa(v)
-		resultGetNumber := testProtocol_GET_NUMBER(url, token, country, k)
-		print("    ответ каждой записи:", resultGetNumber)
-		redactString = "заявлено " + count + ", получено " + resultGetNumber
-		break
-	}
+
+	message_info := fmt.Sprintf("заявлено " + strconv.Itoa(countNumber) + ", получено " + strconv.Itoa(len(numbers)))
 
 	// Проверяем количество номеров
-	if count != resultGetNumber {
+	if len(numbers) != countNumber {
 		// Сохраняем результаты в базе данных с статусом error
 		_, err = db.Exec(`
-			INSERT INTO get_numbers (id, url, token, result, status, stage)
-			VALUES (?, ?, ?, ?, ?, ?);
-		`, reportID, url, token, redactString, "error", "done")
+            INSERT INTO get_numbers (id, url, token, result, status, stage)
+            VALUES (?, ?, ?, ?, ?, ?);
+        `, reportID, url, token, message_info, "error", "done")
 		if err != nil {
 			log.Fatal(err)
 		}
 	} else {
 		// Сохраняем результаты в базе данных с статусом success
 		_, err = db.Exec(`
-			INSERT INTO get_numbers (id, url, token, result, status, stage)
-			VALUES (?, ?, ?, ?, ?, ?);
-		`, reportID, url, token, redactString, "success", "done")
+            INSERT INTO get_numbers (id, url, token, result, status, stage)
+            VALUES (?, ?, ?, ?, ?, ?);
+        `, reportID, url, token, message_info, "success", "done")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -328,14 +322,37 @@ func createReport(url string, token string) string {
 
 	// Сохраняем результаты в базе данных
 	_, err = db.Exec(`
-		INSERT INTO reports (id, url, token, result, status, stage)
-		VALUES (?, ?, ?, ?, ?, ?);
-	`, reportID, url, token, responseJSON, "success", "done")
+        INSERT INTO reports (id, url, token, result, status, stage)
+        VALUES (?, ?, ?, ?, ?, ?);
+    `, reportID, url, token, responseJSON, "success", "done")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	return reportID
+}
+
+func getNumbers(url string, token string, country string, countNumber int, oneKey string) ([]string, error) {
+	// Создаем map для хранения уникальных номеров
+	numbersMap := make(map[string]bool)
+
+	// Создаем слайс для хранения уникальных номеров
+	var numbers []string
+
+	// Отправляем запросы в цикле
+	for i := 0; i < countNumber; i++ {
+		_, getNumberResponse, err := testProtocol_GET_NUMBER(url, token, country, oneKey)
+		if err != nil {
+			fmt.Println("Ошибка:", err)
+			return nil, err
+		}
+		number := getNumberResponse.Number
+		if _, ok := numbersMap[number]; !ok {
+			numbersMap[number] = true
+			numbers = append(numbers, number)
+		}
+	}
+	return numbers, nil
 }
 
 func reportHandler(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +370,7 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Еще один запрос для GET_NUMBER
+	// Запрос для GET_NUMBER
 	row2 := db.QueryRow(`
         SELECT result, status, stage
         FROM get_numbers
@@ -386,7 +403,6 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// logic service
 	http.HandleFunc("/", handleForm)
 	http.HandleFunc("/report/", reportHandler)
 	http.ListenAndServe(":8080", nil)
