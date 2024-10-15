@@ -282,17 +282,17 @@ func createReport(url string, token string) string {
 
 	country := response.CountryList[0].Country
 	var countNumber int
-	var oneKey string
+	var service string
 	for _, value := range response.CountryList[0].OperatorMap {
 		for k, v := range value {
 			countNumber = v
-			oneKey = k
+			service = k
 			break
 		}
 		break
 	}
 
-	numbers, err := getNumbers(url, token, country, countNumber, oneKey)
+	numbers, err := getNumbers(url, token, country, countNumber, service)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -332,21 +332,31 @@ func createReport(url string, token string) string {
 	return reportID
 }
 
-func getNumbers(url string, token string, country string, countNumber int, oneKey string) ([]string, error) {
+func getNumbers(url string, token string, country string, countNumber int, service string) ([]string, error) {
 	// Создаем map для хранения уникальных номеров
 	numbersMap := make(map[string]bool)
 
 	// Создаем слайс для хранения уникальных номеров
 	var numbers []string
 
-	// Отправляем запросы в цикле
+	// Канал для хранения результатов запросов
+	results := make(chan string)
+
+	// Запускаем горутину для каждого запроса
 	for i := 0; i < countNumber; i++ {
-		_, getNumberResponse, err := testProtocol_GET_NUMBER(url, token, country, oneKey)
-		if err != nil {
-			fmt.Println("Ошибка:", err)
-			return nil, err
-		}
-		number := getNumberResponse.Number
+		go func() {
+			_, getNumberResponse, err := testProtocol_GET_NUMBER(url, token, country, service)
+			if err != nil {
+				fmt.Println("Ошибка:", err)
+				return
+			}
+			results <- getNumberResponse.Number
+		}()
+	}
+
+	// Ожидаем результаты запросов
+	for i := 0; i < countNumber; i++ {
+		number := <-results
 		if _, ok := numbersMap[number]; !ok {
 			numbersMap[number] = true
 			numbers = append(numbers, number)
