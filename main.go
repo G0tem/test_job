@@ -301,7 +301,7 @@ func createReport(url string, token string) string {
 		count = strconv.Itoa(v)
 		resultGetNumber := testProtocol_GET_NUMBER(url, token, country, k)
 		print("    ответ каждой записи:", resultGetNumber)
-		redactString = "заявлено" + count + ", получено " + resultGetNumber
+		redactString = "заявлено " + count + ", получено " + resultGetNumber
 		break
 	}
 
